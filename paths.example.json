@@ -1,0 +1,17 @@
+{
+  "pi3x": {
+    "python": "/ABSOLUTE/PATH/TO/pi3x-env/bin/python",
+    "repo": "/ABSOLUTE/PATH/TO/Pi3",
+    "checkpoint": "/ABSOLUTE/PATH/TO/pi3x.safetensors"
+  },
+  "omnivggt": {
+    "python": "/ABSOLUTE/PATH/TO/omnivggt-env/bin/python",
+    "repo": "/ABSOLUTE/PATH/TO/OmniVGGT",
+    "checkpoint": "/ABSOLUTE/PATH/TO/omnivggt.safetensors"
+  },
+  "any3r": {
+    "python": "/ABSOLUTE/PATH/TO/any3r-env/bin/python",
+    "repo": "/ABSOLUTE/PATH/TO/Any3R",
+    "checkpoint": "/ABSOLUTE/PATH/TO/any3r-weights-directory"
+  }
+}

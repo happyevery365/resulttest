@@ -1,0 +1,19 @@
+{
+  "cam_0": {
+    "model": "opencv_fisheye",
+    "width": 768,
+    "height": 768,
+    "K": [[240, 0, 383.5], [0, 240, 383.5], [0, 0, 1]],
+    "D": [0.01, -0.001, 0.0001, 0],
+    "pixel_convention": "opencv"
+  },
+  "cam_1": {
+    "model": "pinhole",
+    "width": 768,
+    "height": 768,
+    "intrinsics": [320, 320, 383.5, 383.5],
+    "distortion_model": "none",
+    "D": [],
+    "pixel_convention": "opencv"
+  }
+}

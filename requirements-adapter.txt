@@ -1,0 +1,5 @@
+# Install in existing model environments only if missing. Do not replace torch/numpy versions.
+PyYAML>=6
+Pillow>=9
+opencv-python-headless>=4.8
+scipy>=1.10
