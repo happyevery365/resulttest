@@ -1,0 +1,210 @@
+三个模型的官方样例与环境测试
+==========================
+
+这份说明运行各模型仓库自带的入口，不依赖业务 YAML，也不使用本适配器的 run.py。
+命令已对照本机已安装版本的源代码和 --help 核对；其他版本请先检查 --help。
+其中 /path/to/... 都是占位路径，必须替换为你服务器上的实际绝对路径。
+
+三个环境保持独立：OmniVGGT 用 omnivggt，Any3R 用 any3r，Pi3X 用能运行它的本机 Python。
+下面操作需在相应仓库目录中执行。初次使用官方样例，先排除业务数据/标定格式的影响。
+
+一、先分别检查环境和 GPU
+-----------------------
+在每个模型对应的环境中分别执行下面三条命令：
+
+  python -c "import sys; print(sys.executable)"
+  python -m pip check
+  python -c "import torch; print('torch:', torch.__version__); print('CUDA build:', torch.version.cuda); print('CUDA available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE')"
+
+OmniVGGT 先 conda activate omnivggt；Any3R 先 conda activate any3r。
+Pi3X 在其原来能运行的终端环境里执行，避免在 Any3R 环境中误用同名 python。
+CUDA available 应为 True。pip check 通过、import torch 成功都不等于模型推理成功。
+如果报 ModuleNotFoundError，先核对 sys.executable，确定环境正确后再安装缺失依赖。
+
+二、Pi3X 官方样例
+----------------
+代码入口是 example_mm.py；example.py 是旧版 Pi3，不能混用两个模型的权重。
+
+在 Pi3X 对应的 Python 环境中执行：
+
+  cd /path/to/Pi3
+  python example_mm.py --help
+
+指定本地权重文件：
+
+  PI3_WEIGHTS=/path/to/weights/pi3x.safetensors
+  ls -lh "$PI3_WEIGHTS"
+  ls examples/room/rgb
+
+这里 PI3_WEIGHTS 是文件，必须是 Pi3X 权重，不能填目录，也不能用旧 Pi3 权重代替。
+从 Hugging Face 下载时文件可能叫 model.safetensors；文件名无所谓，内容必须属于 Pi3X。
+
+先跑 RGB-only 官方样例：
+
+  CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 python example_mm.py \
+    --data_path examples/room/rgb \
+    --ckpt "$PI3_WEIGHTS" \
+    --interval 2 \
+    --device cuda \
+    --save_path outputs/official_pi3x/room.ply
+
+--interval 2 表示隔一张取一张，先用较少图片检查显存；确认运行后可改为 1。
+输出：outputs/official_pi3x/room.ply。
+终端出现 Saving point cloud to 和 Done，并生成非空 PLY，说明完成了这次样例推理。
+本版本 --ckpt 分支会用 strict=False 加载，因为 RGB-only 时去掉了多模态分支；
+这更要求你选对 Pi3X 权重，不能只凭命令没有报错判断下载了正确模型。
+
+如果还要测试官方提供的相机/深度先验：
+
+  CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 python example_mm.py \
+    --data_path examples/room/rgb \
+    --conditions_path examples/room/condition.npz \
+    --ckpt "$PI3_WEIGHTS" \
+    --interval 2 \
+    --device cuda \
+    --save_path outputs/official_pi3x/room_with_conditions.ply
+
+先确认 examples/room/condition.npz 存在。此 NPZ 必须与图片顺序对应，官方入口读取
+poses、depths、intrinsics 三个键。它不直接读取你的 cam_N.yaml。
+第一次先不加 --conditions_path，把 RGB-only 链路跑通。
+缺少 CUDA RoPE 扩展时提示使用 PyTorch 回退，不一定意味着推理失败。
+
+三、OmniVGGT 官方样例
+--------------------
+  conda activate omnivggt
+  cd /path/to/OmniVGGT
+  python inference.py --help
+
+本版本官方 inference.py 没有 --ckpt / --weights 参数，而是在代码里读取：
+
+  checkpoints/OmniVGGT.safetensors
+
+这个相对路径以当前工作目录为起点，因此先 cd 到 OmniVGGT 仓库。
+如果权重已经存在于这个位置，不必再创建链接。否则可以建立软链接：
+
+  OMNI_WEIGHTS=/path/to/weights/omnivggt.safetensors
+  ls -lh "$OMNI_WEIGHTS"
+  mkdir -p checkpoints
+  ln -s "$OMNI_WEIGHTS" checkpoints/OmniVGGT.safetensors
+  ls -lh checkpoints/OmniVGGT.safetensors
+
+注意目标文件名大小写必须是 OmniVGGT.safetensors。
+ln 提示 File exists 时先检查现有文件，不要盲目覆盖。
+
+本版本会在构造模型时尝试从 torch.hub 下载 DINOv2，即使完整 OmniVGGT 权重已在本地。
+离线服务器需先应用本适配器提供的初始化补丁：
+
+  python /path/to/resulttest/patch_omnivggt_offline.py /path/to/OmniVGGT
+
+该补丁保留原默认行为。设置下方环境变量后跳过额外下载，随后官方入口仍会
+strict=True 加载完整 OmniVGGT checkpoint。仅设置变量而没有应用补丁不起作用。
+
+先跑官方 office 样例：
+
+  CUDA_VISIBLE_DEVICES=0 OMNIVGGT_SKIP_BACKBONE_DOWNLOAD=1 HF_HUB_OFFLINE=1 \
+  python inference.py \
+    --image_folder example/office/images \
+    --target_size 224 \
+    --port 8080 \
+    --save_glb
+
+这里 example 是单数，与另外两个仓库的 examples 不同。
+输出 GLB 位于 example/office/images/scene.glb；这个官方入口没有单独的输出路径参数。
+--save_glb 会向输入图片目录写入 scene.glb，所以首次使用官方样例，不要直接指定只读业务数据目录。
+推理结束后会启动 viser 网页，程序继续运行是正常行为。确认 GLB 已生成后可 Ctrl+C 停止。
+默认 GLB 由深度和预测相机生成，不是 Gaussian Splatting 文件。
+--use_point_map 可以切换网页点云来源；本版本 GLB 导出分支仍使用深度，不随该选项切换。
+
+如果在远程服务器运行，从你自己的电脑另开终端：
+
+  ssh -N -L 18080:127.0.0.1:8080 用户名@服务器地址
+
+然后在本地浏览器访问 http://127.0.0.1:18080。
+这个 ssh 命令要在你的电脑执行，不是在服务器已经登录的 shell 里再次执行。
+只检查能否推理时也可以直接查看 scene.glb 是否生成，不必打开网页。
+
+官方还提供相机条件输入：
+
+  CUDA_VISIBLE_DEVICES=0 OMNIVGGT_SKIP_BACKBONE_DOWNLOAD=1 HF_HUB_OFFLINE=1 \
+  python inference.py \
+    --image_folder example/office/images \
+    --camera_folder example/office/cameras \
+    --target_size 224 --port 8080 --save_glb
+
+先确认这个 cameras 目录存在。它要求官方定义的 .txt 相机文件，不直接接受业务 YAML。
+首次不要加 --mask_sky，否则还会涉及额外天空分割模型下载。
+官方入口默认使用 float32，显存占用可能高于本适配器的混合精度运行；显存不足先减少图片数量。
+这里没有发现与 Any3R 类似的完整官方 pytest 冒烟套件；configs/test.py 是配置文件，不是测试入口。
+
+四、Any3R 官方样例
+-----------------
+  conda activate any3r
+  cd /path/to/Any3R
+  python demo.py --help
+
+Any3R 的 --model 传本地权重目录，而不是单个文件：
+
+  ANY3R_MODEL_DIR=/path/to/weights/Any3R
+  ls -lh "$ANY3R_MODEL_DIR/config.json" "$ANY3R_MODEL_DIR/model.safetensors"
+
+目录结构必须类似：
+  /path/to/weights/Any3R/
+      config.json
+      model.safetensors
+
+用官方鱼眼样例测试：
+
+  CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 python demo.py \
+    --images examples/fiord_meetingroom/images \
+    --cameras examples/fiord_meetingroom/cameras.json \
+    --model "$ANY3R_MODEL_DIR" \
+    --size 224 \
+    --device cuda \
+    --out outputs/official_fiord
+
+输出通常包含 points.ply、scene.glb、cameras.json、depth.npz。
+GLB 导出需要对应依赖，例如 trimesh；以终端实际输出和生成文件为准。
+终端打印视图数、相机类型、inference 耗时和输出文件路径，说明完成了样例链路。
+--cameras 指定的是样例自带标定 JSON。不能直接把你的 cam_N.yaml 填进这个参数。
+不要随便用 --camera equidistant --fov 190 替代真实标定，这会改变输入相机模型。
+--model 若省略会默认去 Hugging Face 查找 Jingong/Any3R；离线测试务必指定有效本地目录。
+
+五、Any3R 自带的 pytest
+----------------------
+在 any3r 环境和 Any3R 仓库目录下执行。pytest 没安装时才补装：
+
+  python -m pytest --version
+  python -m pip install pytest
+
+先跑相机几何和预处理测试，不需要加载大模型权重：
+
+  python -m pytest -q -rs tests/test_cameras.py tests/test_io.py
+
+再跑真正加载 GPU 和权重的测试，先只选一个鱼眼样例：
+
+  CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 ANY3R_WEIGHTS="$ANY3R_MODEL_DIR" \
+  python -m pytest -q -rs tests/test_inference.py -k fiord_meetingroom
+
+注意测试入口的权重参数叫环境变量 ANY3R_WEIGHTS，值同样是权重目录；
+不是命令行 --model，也不是单个 safetensors 路径。
+全部官方推理样例测试：
+
+  CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 ANY3R_WEIGHTS="$ANY3R_MODEL_DIR" \
+  python -m pytest -q -rs tests/test_inference.py
+
+测试使用其源码默认尺寸，和前面 --size 224 的快速 demo 不同，显存占用可能更高。
+passed 才表示该项测试通过；skipped 不表示推理通过。
+官方测试在没有 CUDA 或加载不到权重时可能主动 skip，-rs 会显示原因。
+不要设置 ANY3R_WRITE_REFERENCE，它会覆盖仓库里的参考结果，失去对照测试的意义。
+数值参考测试失败时，也应检查代码版本、权重版本和运行精度，而不只是是否能 import。
+
+六、权重参数速查
+----------------
+Pi3X 官方 demo：      --ckpt /绝对路径/pi3x.safetensors
+OmniVGGT 官方 demo：  仓库工作目录下 checkpoints/OmniVGGT.safetensors（文件或软链接）
+Any3R 官方 demo：     --model /绝对路径/Any3R权重目录
+Any3R 官方 pytest：   ANY3R_WEIGHTS=/绝对路径/Any3R权重目录
+
+以上测试确认环境、权重、预处理和推理入口是否可运行，不等同于业务场景重建质量评测。
+本说明核对了三个 --help 入口及测试源代码；没有声称本轮执行了所有官方 pytest。
+本机 Any3R 环境当前未安装 pytest，官方 pytest 命令留给需要执行该测试的环境使用。
