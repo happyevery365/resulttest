@@ -1,0 +1,200 @@
+鱼眼四视图重建：先回到原鱼眼深度，再生成唯一点云
+==================================================
+
+这是独立的新入口 fisheye_depth.py。原有 run.py/run_all.py 的六组实验不变。
+原有 remap 路线导出各视图预测点云；本实验明确不用那个输出融合方式。
+这里的“上”指原图坐标向上，不自动推断重力方向，也不自动旋转原图。
+
+流程
+----
+一张带标定的鱼眼图 -> 左/中/右/上四张针孔图 -> 一次 Pi3X 联合推理
+-> 四张局部 Z 深度 -> 回填原鱼眼的径向距离 -> 原鱼眼每像素一个深度
+-> 使用原图颜色和原相机单位射线，生成一份点云。
+
+不拼接四份点云。不使用 pred['points']。不使用预测位姿移动点云。
+Pi3X 本身仍会产生位姿与点预测，但本流程只取 pred['local_points'][...,2]
+作为各虚拟相机的光轴 Z 深度，并取 sigmoid(conf) 作为合并权重的一部分。
+
+高分辨率版本（推荐看这组）
+--------------------------
+768x768 小样例只适合快速验证。更清晰的流程使用原生 3264x3264 鱼眼 PNG，
+生成四张 896x896 针孔输入，最后回填一张 3264x3264 鱼眼径向距离图。
+这是从原始像素重新 remap，不是把已有 768x768 图片放大。
+
+python fetch_fiord_original.py --out /你的数据目录/fiord_original
+
+此脚本只使用 HTTP Range 读取 ZIP 索引、一小段 images.bin 头、cameras.bin
+和一张原始 PNG。以 COLMAP images.bin 的 camera_id 确认图像与内参对应，
+不会将 Any3R 小样例的标定直接套到另一张原图；这两份标定确实存在差异。
+原始 4.6 GB ZIP 不会整包下载；总传输预算 32 MiB，实测只传输 8381339 字节
+（约 7.99 MiB）。若服务端不支持范围请求则报错停止，不回退下载整包。
+文件完整性由 ZIP 成员 CRC32 校验，并记录下载成员、字节数和 SHA256。
+选中的原图：IMG_20241120_000613_00_729_fisheye1.png，camera_id=1。
+原始标定文件没有声明有效 FOV；脚本默认使用保守的 200 度处理范围，
+这只是有效区域的限制，不是估计出来的镜头规格，不改写原始 K/D。
+
+python fisheye_depth.py run --image /你的数据目录/fiord_original/IMG_20241120_000613_00_729_fisheye1.png --calibration /你的数据目录/fiord_original/camera.json --pi3x-repo /你的代码目录/Pi3 --checkpoint /你的权重目录/pi3x.safetensors --out /你的输出目录/fiord_original_896 --size 896 --fov 90 --yaw 45 --pitch 45 --device cuda:0
+
+同一张原图还测试 --size 448 作为分辨率对照，输出换一个目录。两种情况下
+回填深度图均为原图尺寸；回填像素数不能代表模型真正预测的细节分辨率。
+896 输入比 448 每视图像素数增加四倍，显存/耗时相应增加，精度提升须另行评测。
+需要查看细节时，打开单张 center.png/right.png 等，而非聊天里缩小的拼图。
+FIORD 原始图像本身是倒置取景，此实验保留其相机坐标；“上”是原图向上，
+不代表物理重力向上。不会只旋转图像而忘记同步旋转几何关系。
+
+2026-11-14 同图实测又补充了 --size 672：
+分辨率      峰值显存       重叠距离分歧中位数 / p95
+448         7.94 GiB       0.54% / 3.01%
+672         9.07 GiB       0.78% / 2.50%
+896        10.65 GiB       2.61% / 10.17%
+分歧是内部一致性诊断，不是真值精度。这张样例建议先用 --size 672，
+以比 448 更高的输入分辨率做折中；896 版保留供看细节与继续评测。
+这不是所有场景的最优参数结论。三档最终鱼眼深度均为 3264x3264。
+完整实测记录见 FISHEYE_DEPTH_VALIDATION.txt。
+
+小样例与下载量
+--------------
+FIORD (Gunes et al., SCIA 2025)，真实 Insta360 鱼眼，约 213.6 度视场。
+原始数据：https://zenodo.org/records/15181976
+项目：https://parmisian.github.io/fiord360.github.io/
+本实验只下载 Any3R 发布的 FIORD MeetingRoom 缩小版样例 00、04、08，
+每张 768x768；不是三个不同数据集，也不是同步的三路相机。
+每张图片分别进行一次四视图实验，不把这三张图片混在同一次推理中。
+图片许可 CC BY 4.0；出处说明随样例下载，下载脚本记录 URL、大小和 SHA256。
+固定 Any3R 提交 c6c57bdda7b2526bdf6be28cc3b71d5c56a1eb15。
+三张 JPEG 加 cameras.json 与 SOURCE.md 合计 370317 字节，约 362 KiB。
+不会下载 Any3R 模型，也不会下载 FIORD 的整套 GB 级数据或激光点云。
+
+在 resulttest 仓库目录内执行。以下每条命令都是一行：
+
+python fetch_fisheye_examples.py --out /你的数据目录/fiord_small
+
+下载时需要外网；之后 prepare/infer/fuse 都可以离线。
+下载输出目录应新建，避免覆盖已有文件。Pi3X 权重请使用已经下载的本地文件。
+
+环境与最短运行方式
+------------------
+使用已经装好 Pi3X 的 venv/Conda 环境；不要求安装 Any3R 环境或代码。
+CPU 几何部分只需 NumPy、Pillow、OpenCV。模型部分使用你已有的 torch、
+safetensors 及 Pi3X 上游依赖。不需要额外安装另一种 OpenCV 变体。
+
+source /你的pi3x环境/bin/activate
+python -c "import sys,numpy,cv2,PIL,torch,safetensors; print(sys.executable); print('CUDA:',torch.cuda.is_available())"
+
+一条命令完成全部流程（--pi3x-repo 是 Pi3 源码目录；--checkpoint 是 Pi3X 权重文件）：
+
+python fisheye_depth.py run --image /你的数据目录/fiord_small/images/fisheye_00.jpg --calibration /你的数据目录/fiord_small/cameras.json --pi3x-repo /你的代码目录/Pi3 --checkpoint /你的权重目录/pi3x.safetensors --out /你的输出目录/fiord00 --size 448 --fov 90 --yaw 45 --pitch 45 --device cuda:0
+
+--out 必须不存在或为空；再次实验请换目录。图片 04、08 可分别运行同样命令。
+显存不足可以把 --size 改为 224；尺寸须为正的 112 倍数。
+不需要修改 Pi3X 上游模型代码，不会重新下载权重。
+
+没有 GPU 时，先做 prepare；稍后在有 GPU 的机器上做 infer，再用 CPU 做 fuse。
+
+python fisheye_depth.py prepare --image /你的数据目录/fiord_small/images/fisheye_00.jpg --calibration /你的数据目录/fiord_small/cameras.json --out /你的输出目录/fiord00/prepared --size 448 --fov 90 --yaw 45 --pitch 45
+
+python fisheye_depth.py infer --prepared /你的输出目录/fiord00/prepared --pi3x-repo /你的代码目录/Pi3 --checkpoint /你的权重目录/pi3x.safetensors --out /你的输出目录/fiord00/inference --device cuda:0
+
+python fisheye_depth.py fuse --prepared /你的输出目录/fiord00/prepared --predictions /你的输出目录/fiord00/inference/view_depths.npz --out /你的输出目录/fiord00/fused
+
+infer 会将四张图片放在同一次 forward 中，输入虚拟针孔 K 和已知相对旋转。
+所有虚拟相机中心完全重合、平移为零，不伪造基线。可以用 --no-pose-prior
+关闭模型中的旋转条件做对照，但回映射始终使用已知 remap 旋转。
+输入的相机条件不是硬约束；模型可能预测与这些条件不完全一致的局部射线或位姿。
+inference.json 记录预测射线与已知 K 射线的误差，帮助识别这种偏差。
+
+几何方法与深度合并
+------------------
+1. 原相机：支持明确标定的 KB4 / COLMAP OPENCV_FISHEYE。
+   使用球面形式：theta_d = theta * (1+k1*theta^2+...+k4*theta^8)。
+   在声明视场内校验单调性，用二分求逆得到原图每像素的三维单位射线。
+   可以表示 z<0 的后半球射线；没有把大于 180 度鱼眼当成普通针孔逆投影。
+   此版本没有自动猜测 MEI、double-sphere 或未知业务 YAML 的模型。
+
+2. 虚拟相机：默认左 yaw=-45、中央 0、右 yaw=+45、上 pitch=+45 度。
+   每张水平/垂直 FOV=90 度；R_i 将虚拟坐标转换到原鱼眼坐标。
+   对虚拟像素计算 K_i^-1*[u,v,1]，归一化、乘 R_i，按鱼眼模型投影到
+   原图，再使用 cv2.remap 双线性取色。这是按角度重投影，不是矩形裁剪。
+
+3. 回到原鱼眼：遍历原图每个有效像素 p，取得单位射线 r(p)。
+   q_i = R_i^T * r(p)，若 q_i.z>0 且投影位于第 i 个虚拟视图内，则采样
+   该视图的光轴深度 Z_i。转换到相机中心距离：
+
+       range_i(p) = Z_i(project(K_i,q_i)) / q_i.z
+
+   因为四个虚拟相机中心一致，range_i 才是可以在同一像素上比较的量。
+   直接平均不同视图的 Z_i 是错误的；不能把 Z 深度直接当作沿射线的距离。
+   深度采样在连续有效区域使用双线性；邻域最大/最小深度比超过 1.1，或
+   支持像素无效时，改用最近邻，避免在前景/背景边界产生中间深度。
+
+4. 重叠区：权重 = sigmoid(confidence) * q_i.z^2 * 视图边缘衰减。
+   在每个原图像素上取四个候选径向距离的加权中值，返回一个标量。
+   这会更偏向置信度高、靠近视图中央的有效预测，并减少异常值影响。
+   不保证消除所有接缝；depth_fusion_diagnostics.npz 保存分歧供评测。
+   默认不拟合每个视图的尺度，不做深度补洞，也不以 RGB 亮度判断有效性。
+   需要过滤低置信度时可给 fuse/run 加 --min-confidence 0.2；这会减少覆盖。
+
+5. 先保存原分辨率 fisheye_range.npy，再读取这张距离图生成点：
+
+       point(p) = fisheye_range(p) * r(p)
+       color(p) = 原鱼眼图像的 RGB(p)
+
+   点云坐标系是原鱼眼相机（右/下/前）。每个有效原图像素恰好一个点。
+   未覆盖或无效像素是 NaN，点云不输出这些像素。
+   “左中右上”默认不覆盖全鱼眼；FIORD 样例约覆盖有效区域的 70.9%。
+   像素更多不等于几何细节更多：原图回填受 448x448 虚拟深度分辨率限制。
+
+标定文件
+--------
+直接支持下载的 cameras.json，其 COLMAP 标定尺寸是 3264x3264。
+代码按整图缩放调整到实际 768x768，并处理 COLMAP .5 像素中心到 OpenCV
+整数像素中心的转换。Pi3X 接口再转回它使用的 .5 像素中心，避免半像素偏移。
+只支持“整图缩放”自动换算；若图片裁剪/旋转过，必须先相应修正标定。
+
+自有相机可提供以下 JSON（数字必须换成你自己的已验证标定）：
+
+{"model":"kb4","width":768,"height":768,"pixel_convention":"opencv","K":[[235,0,383.5],[0,235,383.5],[0,0,1]],"D":[0,0,0,0],"fov_deg":190}
+
+不能把此示意 K/D 套用到真实业务相机。原有业务 YAML 解析仍需确认字段。
+
+输出文件
+--------
+prepared/regions.png              在原鱼眼上标出四个角度区域轮廓
+prepared/four_views.png           左中右上四张针孔图的拼图
+prepared/{left,center,right,up}.png  四张模型输入
+prepared/coverage.png             0~4 个虚拟视图覆盖计数，黑色为未覆盖
+prepared/preparation.json         原始/缩放后标定、虚拟 K/R、覆盖率、来源哈希
+prepared/prepared.npz             CPU 预处理结果，可搬到 GPU 机器
+inference/view_depths.npz         depth_z 和 confidence，形状 [4,H,W]
+inference/*_depth_z.png           每张虚拟图的 Z 深度可视化，各自色标
+inference/inference.json         环境、耗时、显存、条件及射线偏差
+inference/predicted_poses_diagnostic_only.npy  只用于诊断，不用于融合
+fused/fisheye_range.npy           原图大小的一张 float32 径向距离图，NaN 无效
+fused/fisheye_range.png           距离图可视化，黑色无效；不是定量深度 PNG
+fused/*_range_on_fisheye.png       每个视图回填到鱼眼后的距离图，采用同一色标
+fused/fisheye_valid.npy/.png      深度有效区域
+fused/selected_view.png          每个像素最终选中哪张视图
+fused/depth_fusion_diagnostics.npz  四个候选距离、权重、计数、分歧
+fused/points.ply                 最终唯一 RGB 点云，可用 CloudCompare 打开
+fused/point_source_uv.npy        点云每一行对应原图哪个像素，方便检查一一对应
+fused/viewer.html                离线点云预览，最多显示 4 万点
+fused/metrics.json               覆盖率、重叠分歧、点数等诊断，不是 GT 精度
+
+实验边界
+--------
+一张鱼眼拆成四个朝向，只有旋转，没有真实视差，不能凭此进行有基线的三角测量。
+深度主要依赖 Pi3X 学到的先验；输入零平移的已知旋转不能保证真实米制尺度。
+本实验不声称恢复绝对尺度，也不把接缝一致性当作真实深度精度。
+输入标定错误、模型深度错误、深度边界插值和姿态条件不一致均可能产生伪影。
+加权中值不会把四个点云拼在一起，但也不保证预测深度正确。
+如需定量精度，后续需同场景真实深度或激光点云，并明确尺度/坐标对齐协议。
+
+CPU 几何测试
+------------
+python -m unittest -v test_fisheye_depth test_fiord_download
+
+测试涵盖超 180 度鱼眼正反投影、与 OpenCV 前半球投影对照、虚拟旋转方向、
+半像素/缩放约定、非单调标定拒绝、解析球面和解析平面深度、前景边界、NaN、
+置信度过滤、加权中值异常值，以及最终点云与原像素一一对应。
+另检查原图下载器的 HTTP Range 支持、下载预算和 COLMAP 相机 ID 读取。
+这些解析深度测试验证代码几何正确性，不代表 Pi3X 真实重建精度。
