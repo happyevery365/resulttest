@@ -257,6 +257,8 @@ Any3R：RGB + 标定单位射线图，包含鱼眼投影、内参和畸变。
 公开样例转换出的测试目录不表示真实同步环视数据。尚未验证业务 YAML 或业务重建质量。
 
 目标仓库：https://github.com/happyevery365/resulttest
+OmniVGGT 的鱼眼四视图深度回填入口：omnivggt_fisheye_depth.py。
+可以直接复用 Pi3X 的 prepared 目录；说明和单行命令见 OMNIVGGT_FISHEYE_DEPTH.txt。
 在另一台服务器获取代码：
   git clone https://github.com/happyevery365/resulttest.git
   cd resulttest

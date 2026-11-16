@@ -1,0 +1,69 @@
+OmniVGGT：鱼眼 → 四个透视图 → 联合预测 → 原鱼眼径向深度 → 唯一点云
+
+用途
+新增入口 omnivggt_fisheye_depth.py，复用 fisheye_depth.py 的全部相机投影、
+RGB remap、深度采样、Z 到径向距离转换、加权中值以及点云导出。
+原有 Pi3X 入口不变。不要用旧 run.py 的逐视图点云导出代替本流程。
+不会修改上游模型的网络结构，也不训练或下载新权重。
+
+关键接口区别
+1. 四张透视图一次联合输入 model.inference，RGB 为 0～1。
+2. 输入虚拟针孔 K 和 world-to-camera 外参 [R_source_virtual.T | 0]。
+   camera_gt_index=[0,1,2,3]，depth_gt_index=[]；深度和对应 mask 只是零占位。
+   没有真实深度条件，没有人为生成平移或视差。
+3. 上游会将相机位姿归一化到第一张图，零基线的尺度除数有下限，不会除零。
+4. 只使用 pred['depth'][0,...,0] 作为光轴 Z。上游 depth_to_cam_coords_points
+   用 x=(u-cx)*Z/fx, y=(v-cy)*Z/fy，可确认其定义。不能取 world_points 的 Z。
+5. 不使用预测位姿、预测内参或预测世界点来回填。回填始终使用已知 remap K/R。
+6. depth_conf 上游激活是 1+exp(logit)，不是概率，不再 sigmoid。
+   用四张图有效区域内同一个最大值进行缩放，使权重落在 [0,1]，满足共享融合器接口。
+   这个共同正比例缩放保留候选之间的权重比，不做逐图归一化，不改加权中值结果。
+   非有限或非正置信度被排除。保存 raw_confidence 和缩放除数以便复查。
+   --min-confidence 阈值针对缩放后的相对权重，不是概率，默认 0。
+7. 权重仍为 confidence * cos(theta)^2 * border_taper；边界采样和中值规则与 Pi3X 相同。
+8. OmniVGGT 相机编码仅包含 R、t 和 fx/fy 对应的 FOV，不能完整编码畸变或偏心主点。
+   本入口只接受居中、零 skew 的虚拟透视 K。共享 remap 使用 (S-1)/2 主点，
+   上游相机解码默认 S/2，存在 0.5 像素约定差异。编码器忽略主点，无法精确传入此差异；
+   不声称内参被完整硬约束，后处理使用实际 remap K，且不人为移动预测深度图。
+9. --no-camera-prior 是 RGB-only 消融，同时关闭 K 和位姿条件，不能解释为仅关外参。
+
+环境与离线初始化
+使用已安装 OmniVGGT 的 Python 环境，适配器额外需要 NumPy、OpenCV、Pillow。
+checkpoint 必须是本地完整 OmniVGGT .safetensors 文件，不是目录。
+上游默认会下载 DINO 初始化权重；本仓库已有补丁可仅跳过这一步，之后严格加载完整模型：
+python patch_omnivggt_offline.py /你的代码目录/OmniVGGT
+入口发现未应用此补丁时会报错，避免意外联网。已打过补丁的仓库不必重复处理。
+
+用现有 Pi3X prepared 目录做相同输入对照（单行命令）
+/你的Omni环境/bin/python omnivggt_fisheye_depth.py --prepared /已有Pi3X结果/prepared --repo /你的代码目录/OmniVGGT --checkpoint /你的权重目录/omnivggt.safetensors --out /你的输出目录/omni_compare --device cuda:0
+此方式不重新 resize/remap，--size/--fov/--yaw/--pitch 不生效。
+结果中的 prepared 是原输入目录的符号链接，移动结果时须同时保留原输入，或复制链接目标内容。
+
+直接从一张鱼眼图运行（分辨率按自己的需求设置）
+/你的Omni环境/bin/python omnivggt_fisheye_depth.py --image /你的鱼眼图.png --calibration /你的camera.json --repo /你的代码目录/OmniVGGT --checkpoint /你的权重目录/omnivggt.safetensors --out /你的输出目录/omni_fisheye --size 672 --fov 90 --yaw 45 --pitch 45 --device cuda:0
+共用预处理要求 size 是 112 的正整数倍，兼容两个模型的 patch 网格；不自动改分辨率。
+标定格式和鱼眼有效 FOV 要求见 FISHEYE_DEPTH.txt。实际业务 YAML 仍需确认模型与字段后适配。
+不能把不同鱼眼模型的参数当作 OPENCV_FISHEYE，也不能忽略图像裁剪对内参的影响。
+输出目录必须不存在或为空，不覆盖已有结果。
+
+输出
+prepared/：四张输入、原图、标定射线和覆盖区域。
+inference/view_depths.npz：四张 depth_z、相对置信度 confidence、原始 raw_confidence。
+inference/input_cameras.npz：实际传入 K 和 world-to-camera 外参。
+inference/inference.json：设备、耗时、显存、输入哈希、置信度定义和限制。
+fused/fisheye_range.npy：原图尺寸径向距离，未覆盖处 NaN。
+fused/point_source_uv.npy：每个点对应的原鱼眼像素。
+fused/points.ply：仅由唯一鱼眼径向深度生成的一份点云。
+fused/viewer.html：可旋转离线预览，抽样最多 40,000 点；完整 PLY 不抽样。
+fused/metrics.json：覆盖率、重叠分歧等内部诊断，不是真值精度。
+
+检查
+python -m unittest -v test_omnivggt_fisheye test_fisheye_depth
+检查外参方向、零基线、非居中 K 拒绝、跨视图置信度比例保留、无效值处理，
+以及共享的鱼眼几何、Z/径向距离转换、深度边界和每像素唯一点导出。
+
+限制
+四张图共光心、没有真实视差，深度依赖模型先验；无真实深度评测或米制尺度保证。
+OmniVGGT 可以接收这些透视图，并不表示原生鱼眼畸变参数得到模型直接支持。
+比较两个模型时可固定原图、四视图、K/R 和融合步骤；置信度来自不同模型，
+数值不能直接比较，当前使用的各自置信度也使实验不等同于只更换深度预测。
