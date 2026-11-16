@@ -1,0 +1,130 @@
+真实鱼眼＋针孔联合重建：KITTI-360 小样例
+=====================================
+
+本实验使用真实的两台相机，不是从同一张全景图合成两种投影。
+KITTI-360 序列 2013_05_28_drive_0000_sync，帧 100 / 1000 / 2000。
+image_00/data_rect 为 1408×376 的整流透视图；image_02/data_rgb 为
+1400×1400 的 MEI 鱼眼图。两台相机在同一车体上，前向/侧向视野部分重叠。
+三个位置属于同一路线，不代表三个独立数据集。
+
+来源和授权
+https://www.cvlibs.net/datasets/kitti-360/documentation.php
+https://www.cvlibs.net/datasets/kitti-360/download.php
+https://github.com/autonomousvision/kitti360Scripts
+Liao, Xie and Geiger, KITTI-360, PAMI 2022；CC BY-NC-SA 3.0。
+请遵守数据集使用条款。本仓库仅发布代码、说明和数值验证记录，不发布图片、权重或点云。
+
+文件与上游修改
+fetch_kitti360_examples.py：官方 ZIP 的 HTTP Range 按需提取，最多 5 组，单次成功读取
+的数据上限 80 MiB；拒绝服务器忽略 Range 后回传整包；--resume 校验成员大小和 CRC。
+--direct 不使用环境里的 HTTP 代理，但保留 HTTPS 证书验证。
+download_manifest.json 记录 URL、ZIP 成员、哈希、请求范围和当次传输字节。
+此前失败请求及其部分传输不在最终 manifest 中；不能把恢复下载量当作整个实验总流量。
+mixed_camera_geometry.py：独立 MEI、针孔、外参、尺度逻辑，不依赖 Any3R 上游。
+mixed_camera_depth.py：CPU prepare / 各自环境 GPU infer / CPU fuse。
+report_mixed_camera.py：本地离线交互点云、三例总览和指标 HTML；不依赖 CDN。
+test_mixed_camera.py：MEI 几何、真实平移、共享尺度、合成平面全链路测试。
+不修改 Pi3X 网络。OmniVGGT 只需已有的离线初始化补丁，随后 strict=True 加载完整权重。
+已有的单鱼眼入口 fisheye_depth.py 和 omnivggt_fisheye_depth.py 保持不变。
+
+完整操作（每条命令均为一行）
+先进入 resulttest 代码目录。用绝对 Python 路径选择环境，不要求 conda 或合并环境。
+预处理/融合需要 NumPy、OpenCV、Pillow、PyYAML；GPU 推理使用各模型已装好的环境。
+以下 /你的... 为需要替换的占位路径。输出目录应不存在或为空，避免覆盖旧实验。
+
+1. 仅下载三组图、标定、时间戳和对应稀疏激光扫描，无需下载全序列或新权重：
+python3 fetch_kitti360_examples.py --out /你的实验目录/data/kitti360_mixed --frames 100 1000 2000 --lidar --direct
+下载中断时，用同样参数加 --resume；数据目录已有文件时必须显式指定 --resume。
+
+2. 预处理一个指定帧（将 100 换成 1000 / 2000 可跑另外两组）：
+/你的Pi3X环境/bin/python mixed_camera_depth.py prepare --data /你的实验目录/data/kitti360_mixed --frame 100 --size 672 --out /你的实验目录/runs/kitti360_0000000100/prepared
+
+3. Pi3X：repo 是 Pi3 仓库目录；checkpoint 是完整 pi3x.safetensors 文件，不是目录：
+/你的Pi3X环境/bin/python mixed_camera_depth.py infer --prepared /你的实验目录/runs/kitti360_0000000100/prepared --model pi3x --repo /你的模型代码/Pi3 --checkpoint /你的权重/pi3x.safetensors --out /你的实验目录/runs/kitti360_0000000100/pi3x/inference --device cuda:0
+
+4. OmniVGGT：repo 是 OmniVGGT 仓库目录；checkpoint 是完整 omnivggt.safetensors 文件。
+若未应用离线初始化补丁，先执行（已打补丁不用重复）：
+python3 patch_omnivggt_offline.py /你的模型代码/OmniVGGT
+然后推理，与 Pi3X 复用完全相同的 prepared：
+/你的Omni环境/bin/python mixed_camera_depth.py infer --prepared /你的实验目录/runs/kitti360_0000000100/prepared --model omnivggt --repo /你的模型代码/OmniVGGT --checkpoint /你的权重/omnivggt.safetensors --out /你的实验目录/runs/kitti360_0000000100/omnivggt/inference --device cuda:0
+
+5. 分别回填深度并导出结果，CPU 即可：
+/你的Pi3X环境/bin/python mixed_camera_depth.py fuse --prepared /你的实验目录/runs/kitti360_0000000100/prepared --predictions /你的实验目录/runs/kitti360_0000000100/pi3x/inference --out /你的实验目录/runs/kitti360_0000000100/pi3x/fused
+/你的Pi3X环境/bin/python mixed_camera_depth.py fuse --prepared /你的实验目录/runs/kitti360_0000000100/prepared --predictions /你的实验目录/runs/kitti360_0000000100/omnivggt/inference --out /你的实验目录/runs/kitti360_0000000100/omnivggt/fused
+
+6. 完成 100 / 1000 / 2000 三组、两个模型后生成总页面：
+/你的Pi3X环境/bin/python report_mixed_camera.py --root /你的实验目录
+python3 -m http.server 8765 --bind 127.0.0.1 --directory /你的实验目录
+服务器终端保持运行；另一台机器建立 SSH 转发后访问 /mixed_comparison.html。
+页面同时包含输入原图、5 视图、两个原相机深度图、可按相机着色的点云和诊断指标。
+点云预览最多抽样 7 万点，默认裁剪参考原点 80 m 外的点，仅影响显示。完整 PLY 未裁剪。
+已有 HTTP 服务时不必再启动同一端口。
+
+7. 几何测试，不需要下载数据或 GPU：
+/你的Pi3X环境/bin/python -m unittest -v test_mixed_camera test_fisheye_depth test_omnivggt_fisheye
+
+具体输入与几何
+1. 鱼眼模型从官方 image_02.yaml 读取 xi、gamma1/gamma2、u0/v0、k1/k2/p1/p2。
+   使用 MEI 统一球面模型加 Brown 畸变，包含切向项；不能当作 OpenCV KB4。
+   Brown 逆解用 Newton 迭代；MEI 取可逆的 plus-root 分支并做射线往返校验。
+   有效区另加保守内接圆，此圆只是处理掩码，不声称是厂商标定的有效 FOV。
+   官方参考投影脚本只用了 k1/k2；本实现也使用标定文件中的非零 p1/p2。
+2. 以 rectified image_00 为参考，必须合入 R_rect_00：
+   T_rig_rect = T_rig_raw00 @ inverse(R_rect_00)
+   T_ref_fish = inverse(T_rig_rect) @ T_rig_fish02
+   T_ref_velo = R_rect_00 @ inverse(T_velo_raw00)
+   R_rect_00 在上式中扩展为 4×4。cam_to_pose 是相机到车体/GPS-IMU，
+   cam_to_velo 是原始 cam00 到 Velodyne，方向不能反用。
+3. 真针孔图 remap 到 672×672 居中方形画布，保留 FOV 与比例，不拉伸，空白边有掩码。
+   宽幅原图在方形画布上会留下较大空白，模型能看到这些空白，可能影响预测。
+   鱼眼展开左(-45°,0°)、中(0°,0°)、右(45°,0°)、上(0°,45°)，每张 FOV 90°。
+   K 主点是 (S-1)/2。鱼眼四视图 f=S/2；针孔画布 f 由原 K 与完整 FOV 计算。
+   虚拟相机 C2W = T_ref_source @ [R_source_virtual,0]。
+   四个鱼眼虚拟光心相同，但均与真实针孔光心有约 0.959 m 的基线，不能置零。
+4. 五张图顺序 [pinhole,left,center,right,up]，RGB 0～1，一次联合前向。
+   Pi3X 传 K（适配其 0.5 像素中心约定）、C2W，五张 ray/pose mask 全开，depth mask 全关。
+   OmniVGGT 传 K、W2C=inverse(C2W)[:3]、camera_gt_index=[0,1,2,3,4]，
+   depth_gt_index=[]，depth/mask 为零占位，不输入真实深度。
+   Omni 的相机 token 不含主点；它解码用 S/2，和 (S-1)/2 存在 0.5 px 差异。
+   这些都是条件输入，不表示模型输出位姿严格等于标定。
+
+尺度与回填（两台实际相机不能共用纯旋转映射）
+两个模型内部归一化位姿平移；米制外参并不能保证米制深度。
+本版本使用所有跨物理相机配对的 known_baseline / predicted_baseline 中位数，
+得到一个全局正倍率 s。仅使用预测相机基线的长度，不使用预测旋转或位置来摆放点云。
+四个共光心虚拟视图之间的配对不参与尺度估计。预测基线塌缩时直接报错。
+这个倍率是启发式尺度估计：预测位姿与深度的误差可能不同，尤其 Omni 本次明显偏大。
+保存原始预测 Z、预测 C2W、倍率、各基线比，便于后续独立复查。没有用 LiDAR 拟合倍率。
+
+对原鱼眼每个单位射线 r，在属于同一台鱼眼的每个虚拟相机内计算 q=R^T*r，
+投影到像素并采样 Z，转为原相机径向距离 d=s*Z/q.z。连续区域双线性插值；
+邻域深度 max/min>1.1 或支持像素无效时取最近邻，避免混合前景/背景。
+权重=confidence*max(q.z,0)^2*border_taper，边缘 10% 带衰减，最小 taper 0.01。
+Pi3X confidence 是 sigmoid；Omni 是 1+exp 后以全部有效视图共同最大值缩放。
+对同一原像素的候选 d 取加权中值，不作高斯平均、不补洞、不融合虚拟点云。
+针孔原像素同理从自己的居中画布恢复深度，不与鱼眼距离通过纯旋转混合。
+先保存 pinhole_range.npy 和 fisheye_range.npy，再读取：
+   P_reference = R_reference_source * (d*r) + t_reference_source
+每台相机每个有效像素只产生一个点，分别输出 PLY；最后组合两个真实相机深度导出的点云。
+同一物体可能由两台相机各产生点，本版不进行跨物理相机重复表面去重。
+
+输出
+prepared/prepared.npz：5 张 RGB、掩码、K/R、C2W、原相机射线和原图。
+prepared/preparation.json：图像哈希、同步时间差、内外参、有效范围说明。
+inference/predictions.npz：depth_z、confidence、raw_confidence、predicted_c2w、depth_scale。
+inference/inference.json：模型环境、设备、耗时、显存、准备数据哈希、尺度记录。
+fused/{pinhole,fisheye}_range.npy：原图分辨率径向距离；无效处 NaN，非光轴 Z。
+fused/{pinhole,fisheye}_point_uv.npy：每个点对应的原相机像素。
+fused/{pinhole,fisheye}_points.ply：分别由原相机深度图生成的点云。
+fused/points.ply / points.npz：统一参考坐标中的两相机组合结果，NPZ 带 source_camera。
+fused/metrics.json：覆盖、重叠分歧、尺度、稀疏 LiDAR 诊断。
+
+评测边界
+LiDAR 只用于诊断：转换到各相机，投影到最近像素，同像素选最近扫描点；
+取 2–80 m 且预测有效的点，比较径向距离，输出 AbsRel、RMSE、delta1.25 等。
+AbsRel = mean(abs(pred-gt)/gt)，不是像素重叠一致性。
+没有激光扫描运动补偿、严格遮挡过滤或官方评测 mask，动态物体和跨传感器可见性有影响。
+因此这些数值只能称为稀疏激光诊断，不能称为官方精度或完整深度真值评测。
+相机时间戳必须记录；本次 3 组差值均 <0.5 ms。脚本发现 >50 ms 会拒绝继续，
+50 ms 是程序保护阈值，不代表小于此值就一定满足任意运动场景的同步精度。
+本版本专门适配 KITTI-360；不能未经核对直接读取业务 cam_N.yaml。

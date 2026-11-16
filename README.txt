@@ -10,6 +10,10 @@
 -> 每原图像素一个深度 -> 单份点云。入口 fisheye_depth.py，详见 FISHEYE_DEPTH.txt。
 这条路线不使用原有 remap 点云拼接输出，支持 CPU prepare/fuse 和独立 GPU infer。
 
+新增真实混合相机实验：KITTI-360 鱼眼＋针孔，两个模型 Pi3X / OmniVGGT 各跑三组。
+入口 mixed_camera_depth.py，先生成每台原相机深度再统一到标定坐标系。
+下载、权重路径、单行复现命令和限制见 MIXED_CAMERA_DEPTH.txt；实测见 MIXED_CAMERA_VALIDATION.txt。
+
 1. 先查看配置结构，不必粘贴标定数值
 ---------------------------------
 在服务器进入本目录，激活一个有 PyYAML 的环境。inspect_schema.py 是独立脚本，
